@@ -17,7 +17,7 @@ import logging
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Literal
 
@@ -234,6 +234,7 @@ class Engine:
         self.day_summaries: list[DaySummary] = []
         self.equity_curve: list[tuple[datetime, Decimal]] = []
         self.events_log: deque[_LogEntry] = deque(maxlen=300)
+        self.fills_today: list[Fill] = []
         self.started_at: datetime | None = None
 
         self._queue = _EventQueue()
@@ -397,6 +398,7 @@ class Engine:
             self.close_day()
         self.day = today
         self.risk.new_day()
+        self.orders.prune_finished_before(datetime.combine(today, time(0), tzinfo=JST))
         self._flatten_requested = False
         self._mismatch_streak.clear()
         self._stale_paused = False
@@ -428,6 +430,7 @@ class Engine:
             self.day_summaries.append(summary)
         self._cumulative_before_today += summary.net
         self.portfolio.reset_day()
+        self.fills_today = []
         return summary
 
     @property
@@ -467,6 +470,7 @@ class Engine:
 
     async def _on_fill(self, fill: Fill) -> None:
         realized = self.portfolio.apply_fill(fill)
+        self.fills_today.append(fill)
         if self.repo is not None:
             self.repo.save_fill(self.run_id, self.mode, fill)
         self.strategy.on_fill(fill, self.ctx)
@@ -893,7 +897,18 @@ class Engine:
         feed = self.feed
         last_msg = feed.last_message_at if feed is not None else None
         phase = self.schedule.phase(now)
-        orders = sorted(self.orders.all_orders(), key=lambda o: o.updated_at, reverse=True)
+        orders = sorted(
+            (
+                o
+                for o in self.orders.all_orders()
+                if o.status.is_active or o.request.created_at.date() == self.day
+            ),
+            key=lambda o: o.updated_at,
+            reverse=True,
+        )
+        flattening = self._flatten_requested and (
+            bool(p.open_symbols()) or bool(self.orders.active_orders())
+        )
         cfg = self.config
         return {
             "mode": self.mode,
@@ -909,7 +924,7 @@ class Engine:
                 "reason": self.risk.reason,
                 "loss_usage": self.risk.loss_usage(p),
                 "consecutive_errors": self.risk.consecutive_errors,
-                "flattening": self._flatten_requested,
+                "flattening": flattening,
                 "limits": {
                     "max_daily_loss": float(cfg.risk.max_daily_loss),
                     "max_position_value_per_symbol": float(cfg.risk.max_position_value_per_symbol),

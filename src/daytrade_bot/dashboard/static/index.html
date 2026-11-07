@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>dtbot ダッシュボード</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
+  <script src="/static/app.js" type="module"></script>
+</head>
+<body>
+  <header class="bar" id="statebar" data-state="unknown">
+    <div class="bar__id">
+      <span class="logo">dtbot</span>
+      <span class="mode" id="mode">接続中</span>
+    </div>
+    <div class="bar__status" role="status" aria-live="polite">
+      <strong id="state-label">状態を確認しています</strong>
+      <span id="state-reason"></span>
+    </div>
+    <div class="bar__actions" id="controls" hidden>
+      <button type="button" class="btn" id="btn-pause">新規エントリーを止める</button>
+      <button type="button" class="btn" id="btn-resume" hidden>新規エントリーを再開する</button>
+      <button type="button" class="btn" id="btn-flatten">全決済する</button>
+      <button type="button" class="btn btn--halt" id="btn-halt">緊急停止</button>
+      <button type="button" class="btn" id="btn-clear" hidden>緊急停止を解除する</button>
+    </div>
+  </header>
+
+  <div class="notice" id="notice" role="alert" hidden></div>
+
+  <nav class="tabs" aria-label="表示の切り替え">
+    <button type="button" class="tab" id="tab-live" aria-pressed="true">ライブ</button>
+    <button type="button" class="tab" id="tab-backtest" aria-pressed="false">バックテスト</button>
+    <span class="clock" id="clock" aria-label="ボットの時刻"></span>
+  </nav>
+
+  <main id="view-live">
+    <section class="ribbon" aria-labelledby="ribbon-title">
+      <h2 class="visually-hidden" id="ribbon-title">本日の立会</h2>
+      <div class="ribbon__track" id="ribbon">
+        <div class="seg seg--session" data-from="0" data-to="150"><span>前場</span></div>
+        <div class="seg seg--lunch" data-from="150" data-to="210"><span>昼休み</span></div>
+        <div class="seg seg--session" data-from="210" data-to="385"><span>後場</span></div>
+        <div class="seg seg--preclose" data-from="385" data-to="390" title="15:25〜15:30 は約定しない注文受付時間"></div>
+        <div class="mark mark--cutoff" id="mark-cutoff"><span>新規締切</span></div>
+        <div class="mark mark--flatten" id="mark-flatten"><span>手仕舞い</span></div>
+        <div class="needle" id="needle" hidden><span id="needle-label"></span></div>
+      </div>
+      <div class="ribbon__scale" aria-hidden="true">
+        <span data-at="0">9:00</span><span data-at="150">11:30</span><span data-at="210">12:30</span><span data-at="390">15:30</span>
+      </div>
+      <p class="ribbon__phase" id="phase"></p>
+    </section>
+
+    <section class="pnl panel" aria-labelledby="pnl-title">
+      <div class="pnl__head">
+        <h2 id="pnl-title">本日の損益</h2>
+        <p class="pnl__net num" id="pnl-net">—</p>
+      </div>
+      <div class="budget" id="budget" aria-hidden="true">
+        <div class="budget__scale">
+          <span class="budget__halt" id="budget-halt"></span>
+          <span class="budget__zero">0</span>
+        </div>
+        <div class="budget__track">
+          <div class="budget__fill" id="budget-fill"></div>
+          <div class="budget__zero-line"></div>
+        </div>
+      </div>
+      <p class="budget__caption" id="budget-caption"></p>
+      <dl class="figures">
+        <div><dt>確定損益</dt><dd class="num" id="pnl-realized">—</dd></div>
+        <div><dt>評価損益</dt><dd class="num" id="pnl-unrealized">—</dd></div>
+        <div><dt>手数料</dt><dd class="num" id="pnl-fees">—</dd></div>
+        <div><dt>取引</dt><dd class="num" id="pnl-trades">—</dd></div>
+        <div><dt>建玉の合計</dt><dd class="num" id="exposure">—</dd></div>
+        <div><dt>時価配信</dt><dd id="feed">—</dd></div>
+      </dl>
+    </section>
+
+    <div class="grid">
+      <section class="panel chart-panel" aria-labelledby="chart-title">
+        <div class="panel__head">
+          <h2 id="chart-title">値動き</h2>
+          <div class="symbols" id="symbols" role="group" aria-label="銘柄"></div>
+        </div>
+        <div class="chart" id="chart" role="img" aria-label="選択した銘柄の1分足と約定"></div>
+        <p class="legend"><span class="legend__up">赤は上昇・買い</span>、<span class="legend__down">青は下落・売り</span>(日本のチャートの慣習)</p>
+      </section>
+
+      <section class="panel" aria-labelledby="positions-title">
+        <div class="panel__head"><h2 id="positions-title">建玉</h2></div>
+        <div class="table-wrap">
+          <table class="table" id="positions">
+            <thead><tr><th scope="col">銘柄</th><th scope="col" class="r">数量</th><th scope="col" class="r">平均単価</th><th scope="col" class="r">現値</th><th scope="col" class="r">評価損益</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="empty" id="positions-empty">建玉はありません。</p>
+
+        <div class="panel__head panel__head--sub"><h2 id="orders-title">注文</h2></div>
+        <div class="table-wrap">
+          <table class="table" id="orders" aria-labelledby="orders-title">
+            <thead><tr><th scope="col">時刻</th><th scope="col">銘柄</th><th scope="col">内容</th><th scope="col" class="r">約定/数量</th><th scope="col">状態</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="empty" id="orders-empty">本日の注文はまだありません。</p>
+      </section>
+
+      <section class="panel" aria-labelledby="trips-title">
+        <div class="panel__head"><h2 id="trips-title">本日の取引</h2></div>
+        <div class="table-wrap">
+          <table class="table" id="trips">
+            <thead><tr><th scope="col">決済</th><th scope="col">銘柄</th><th scope="col">売買</th><th scope="col" class="r">数量</th><th scope="col" class="r">建値→決済</th><th scope="col" class="r">損益</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="empty" id="trips-empty">決済した取引はまだありません。</p>
+      </section>
+
+      <section class="panel" aria-labelledby="log-title">
+        <div class="panel__head"><h2 id="log-title">記録</h2></div>
+        <ol class="log" id="log" aria-live="polite"></ol>
+      </section>
+    </div>
+  </main>
+
+  <main id="view-backtest" hidden>
+    <div class="bt">
+      <section class="panel bt__list" aria-labelledby="bt-list-title">
+        <div class="panel__head"><h2 id="bt-list-title">実行したバックテスト</h2></div>
+        <ul class="runs" id="runs"></ul>
+        <p class="empty" id="runs-empty">まだありません。<code>dtbot backtest --from 2026-10-01 --to 2026-10-31</code> で実行すると、ここに表示されます。</p>
+      </section>
+      <section class="panel bt__detail" id="bt-detail" aria-labelledby="bt-title" hidden>
+        <div class="panel__head"><h2 id="bt-title"></h2></div>
+        <p class="bt__meta" id="bt-meta"></p>
+        <dl class="figures figures--wide" id="bt-figures"></dl>
+        <h3>累積損益</h3>
+        <div class="chart chart--short" id="bt-equity" role="img" aria-label="累積損益の推移"></div>
+        <h3>日ごとの損益</h3>
+        <div class="chart chart--short" id="bt-daily" role="img" aria-label="日ごとの損益"></div>
+        <h3>取引</h3>
+        <div class="table-wrap table-wrap--tall">
+          <table class="table" id="bt-trades">
+            <thead><tr><th scope="col">建てた時刻</th><th scope="col">銘柄</th><th scope="col">売買</th><th scope="col" class="r">数量</th><th scope="col" class="r">建値→決済</th><th scope="col" class="r">保有</th><th scope="col" class="r">損益</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <span id="version"></span>
+    <span>チャート: <a href="https://www.tradingview.com/" rel="noopener noreferrer" target="_blank">TradingView Lightweight Charts™</a>(Apache License 2.0)</span>
+  </footer>
+
+  <dialog class="confirm" id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <div class="confirm__actions">
+        <button type="submit" class="btn" value="cancel">やめる</button>
+        <button type="submit" class="btn btn--halt" value="ok" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -70,6 +70,7 @@ ignore = [
     "PLR0917", "E501", "SLF001", "PLW0108", "N802",
 ]
 "src/daytrade_bot/devtools/**" = ["S311"]
+"src/daytrade_bot/cli.py" = ["T201"]
 "src/daytrade_bot/feeds/demo.py" = ["S311"]
 
 [tool.mypy]

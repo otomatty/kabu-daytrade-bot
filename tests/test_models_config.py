@@ -131,6 +131,9 @@ class TestConfig:
             ({"sizing": {"qty": 150}}, "lot_size"),
             ({"risk": {"max_position_value_per_symbol": 5_000_000}}, "合計の上限"),
             ({"unknown_key": 1}, "Extra inputs"),
+            ({"strategy": {"name": "orb", "params": {"range_minutes": 0}}}, "range_minutes"),
+            ({"strategy": {"name": "orb", "params": {"typo": 1}}}, "typo"),
+            ({"strategy": {"name": "missing"}}, "見つかりません"),
         ],
     )
     def test_invalid(self, overrides: dict[str, object], message: str) -> None:
@@ -162,7 +165,7 @@ class TestConfig:
 
     def test_example_config_is_valid(self) -> None:
         root = Path(__file__).resolve().parent.parent
-        cfg = load_config(root / "config" / "settings.example.yaml")
+        cfg = load_config(root / "src" / "daytrade_bot" / "resources" / "settings.example.yaml")
         assert cfg.trading.live_enabled is False
 
     def test_dotenv_and_secrets(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

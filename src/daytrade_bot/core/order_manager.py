@@ -322,6 +322,21 @@ class OrderManager:
             and now - o.request.created_at >= limit
         ]
 
+    def prune_finished_before(self, cutoff: datetime) -> int:
+        """``cutoff`` より前に作られ、すでに終わった注文を忘れる(日をまたいで動かすとき用)。"""
+        old = [
+            cid
+            for cid, o in self._orders.items()
+            if o.status.is_terminal and o.request.created_at < cutoff
+        ]
+        for cid in old:
+            order = self._orders.pop(cid)
+            if order.broker_order_id:
+                self._by_broker_id.pop(order.broker_order_id, None)
+            self._fill_notional.pop(cid, None)
+            self._applied_fill_qty.pop(cid, None)
+        return len(old)
+
     def restore(self, orders: Iterable[Order]) -> None:
         """保存してあった注文を読み込む(再起動時)。"""
         for order in orders:

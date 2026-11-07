@@ -220,7 +220,12 @@ class AppConfig(_Model):
 
     @model_validator(mode="after")
     def _check_cross(self) -> AppConfig:
-        allow_short = self.strategy.params.get("allow_short", True)
+        # 戦略のパラメータも起動前に検証する(起動してから誤りに気づかないように)
+        from daytrade_bot.core.strategy import load_strategy_class  # noqa: PLC0415
+
+        strategy_cls = load_strategy_class(self.strategy.name)
+        params = strategy_cls.Params.model_validate(self.strategy.params)
+        allow_short = getattr(params, "allow_short", True)
         if self.trading.account_mode is AccountMode.CASH and allow_short:
             raise ValueError(
                 "現物取引では空売りできません。strategy.params.allow_short を false にするか、"
