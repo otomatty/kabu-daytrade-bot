@@ -184,10 +184,15 @@ def create_app(  # noqa: PLR0915 - ルートの定義をまとめて置く
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket, token_q: str = Query(default="", alias="token")) -> None:
-        host = _host_of(websocket.headers.get("host", ""))
+        host_header = websocket.headers.get("host", "").lower()
         origin = websocket.headers.get("origin")
-        origin_host = _host_of(urlsplit(origin).netloc) if origin else host
-        if host not in allowed or origin_host != host or not hmac.compare_digest(token_q, token):
+        # Origin はポートまで含めて一致させる(同じパソコンの別のポートのページからの接続も拒否する)
+        same_origin = origin is None or urlsplit(origin).netloc.lower() == host_header
+        if (
+            _host_of(host_header) not in allowed
+            or not same_origin
+            or not hmac.compare_digest(token_q, token)
+        ):
             await websocket.close(code=1008)
             return
         await websocket.accept()

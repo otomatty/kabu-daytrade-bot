@@ -119,7 +119,8 @@ async def test_commands_in_backtest_mode() -> None:
     assert engine.portfolio.qty("7203") == 100
     assert "停止" in await engine.command("pause")
     assert engine.risk.state is RiskState.PAUSED
-    assert "一時停止できません" in await engine.command(Command.PAUSE)
+    assert "停止しました" in await engine.command(Command.PAUSE, "理由を更新")
+    assert engine.risk.reason == "理由を更新"
     assert "再開" in await engine.command("resume")
     assert "再開できません" in await engine.command("resume")
     assert "全決済" in await engine.command("flatten")
@@ -470,3 +471,128 @@ async def test_limit_order_timeout_cancels() -> None:
     (order,) = engine.orders.all_orders()
     assert order.status is OrderStatus.CANCELED
     assert order.request.effect is PositionEffect.OPEN
+
+
+# ---- 独立したレビューで見つかった不具合の回帰テスト -------------------------------------------
+
+
+async def test_pending_entries_count_toward_limits_across_symbols() -> None:
+    """約定の通知が来る前に複数の銘柄で続けて発注しても、銘柄数と合計の上限を超えない。"""
+    cfg = make_config(
+        universe=[{"symbol": s} for s in ("7203", "6758", "9984")],
+        risk={"max_open_positions": 2, "max_total_position_value": 3_000_000},
+    )
+    script = {at(9, 1): [Signal(s, SignalAction.ENTER_LONG) for s in ("7203", "6758", "9984")]}
+    engine, clock, _ = build_engine(cfg, strategy=ScriptedStrategy(cfg.symbols, script))
+    bars = [b for s in cfg.symbols for b in flat_bars(s, at(9), at(9, 2), 2000)]
+    await replay(
+        engine, clock, ticks_from(bars)[:13]
+    )  # 9:01 の足が確定した直後(まだ約定していない)
+    assert len(engine.orders.all_orders()) == 2
+    assert any("銘柄数の上限" in e.message for e in engine.events_log)
+
+
+async def test_feed_recovery_does_not_undo_flatten() -> None:
+    cfg = make_config(universe=[{"symbol": "7203"}], risk={"stale_data_sec": 10})
+    feed = FakeFeed()
+    engine, clock, _ = build_engine(
+        cfg, mode="paper", feed=feed, start=at(10), strategy=ScriptedStrategy(["7203"], {})
+    )
+    await engine.start()
+    clock.set(at(10, 1))
+    engine.push_timer()
+    await engine.drain()
+    assert engine.risk.reason == STALE_FEED_REASON
+    await engine.command("flatten")
+    feed.last = clock.now()
+    engine.push_timer()
+    await engine.drain()
+    assert engine.risk.state is RiskState.PAUSED  # 時価が戻っても、利用者の全決済の後は再開しない
+    assert engine.risk.reason == "全決済の操作"
+
+
+async def test_previous_day_tick_does_not_clear_halt() -> None:
+    cfg = make_config(universe=[{"symbol": "7203"}])
+    engine, clock, _ = build_engine(cfg, strategy=ScriptedStrategy(["7203"], {}))
+    await replay(engine, clock, ticks_from(flat_bars("7203", at(9), at(9, 2), 2000)))
+    await engine.command("halt")
+    old = tick("7203", at(14, 59, day=TRADING_DAY - timedelta(days=3)), 1990)
+    engine.push_tick(old)
+    await engine.drain()
+    assert engine.risk.state is RiskState.HALTED
+    assert engine.day == TRADING_DAY and engine.old_ticks == 1
+    assert engine.portfolio.last_prices["7203"] == D(2000)
+
+
+async def test_resume_while_halted_keeps_flatten_pending() -> None:
+    cfg = make_config(
+        universe=[{"symbol": "7203"}], strategy={"name": "orb", "params": {"take_profit_r": 20}}
+    )
+    engine, clock, _ = build_engine(cfg)
+    bars = orb_day(after=[2020] * 5) + flat_bars("7203", at(9, 21), at(11, 30), 2022)
+    await replay(engine, clock, ticks_from(bars), until=at(11, 45))
+    await engine.command("halt")
+    assert "再開できません" in await engine.command("resume")
+    await replay(engine, clock, ticks_from(flat_bars("7203", at(12, 30), at(12, 33), 2022)))
+    assert engine.portfolio.qty("7203") == 0
+
+
+async def test_reconcile_success_resets_errors_and_quiet_hours_do_not_halt() -> None:
+    cfg = make_config(
+        universe=[{"symbol": "7203"}],
+        risk={"max_consecutive_errors": 2, "reconcile_interval_sec": 1},
+    )
+    engine, clock, sim = build_engine(
+        cfg, mode="paper", start=at(16), strategy=ScriptedStrategy(["7203"], {})
+    )
+    fail = {"on": True}
+    original = sim.fetch_orders
+
+    async def flaky() -> list[BrokerOrderSnapshot]:
+        if fail["on"]:
+            raise BrokerError("ログアウト中")
+        return list(await original())
+
+    sim.fetch_orders = flaky  # type: ignore[method-assign]
+    await engine.start()
+    for second in range(5):
+        clock.set(at(8, 0, second, day=TRADING_DAY + timedelta(days=1)))
+        engine.push_timer()
+        await engine.drain()
+    assert engine.risk.state is RiskState.ACTIVE  # 取引時間外の失敗では止めない
+    engine.risk.record_error(clock.now())
+    fail["on"] = False
+    clock.set(at(9, 0, 10, day=TRADING_DAY + timedelta(days=1)))
+    engine.push_timer()
+    await engine.drain()
+    assert engine.risk.consecutive_errors == 0  # 照合に成功したら数え直す
+
+
+async def test_flatten_replaces_resting_limit_close_with_market() -> None:
+    cfg = make_config(universe=[{"symbol": "7203"}])
+    s = "7203"
+    script = {
+        at(9, 1): [Signal(s, SignalAction.ENTER_LONG)],
+        at(9, 2): [Signal(s, SignalAction.EXIT, order_type=OrderType.LIMIT, limit_price=D(2100))],
+    }
+    engine, clock, _ = build_engine(cfg, mode="backtest", strategy=ScriptedStrategy([s], script))
+    await replay(engine, clock, ticks_from(flat_bars(s, at(9), at(9, 3), 2000)))
+    assert engine.portfolio.qty(s) == 100
+    await engine.command("flatten")
+    await replay(engine, clock, ticks_from(flat_bars(s, at(9, 3), at(9, 5), 2000)))
+    assert engine.portfolio.qty(s) == 0
+    statuses = [o.status for o in engine.orders.all_orders()]
+    assert OrderStatus.CANCELED in statuses
+
+
+def test_order_ids_differ_between_runs() -> None:
+    cfg = make_config(universe=[{"symbol": "7203"}])
+    e1, _, _ = build_engine(cfg, mode="live", strategy=ScriptedStrategy(["7203"], {}))
+    e2, _, _ = build_engine(cfg, mode="live", strategy=ScriptedStrategy(["7203"], {}))
+    ids = [
+        e.orders.new_request(
+            symbol="7203", side=Side.BUY, qty=100, effect=PositionEffect.OPEN, now=at(9)
+        ).client_order_id
+        for e in (e1, e2)
+    ]
+    assert ids[0] != ids[1]

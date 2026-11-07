@@ -155,6 +155,7 @@ async def test_websocket_auth_and_stream(dash: Dash) -> None:
         (f"{url}?token=wrong-token-000000000", None),
         (url, None),
         (f"{url}?token={TOKEN}", "http://evil.example.com"),
+        (f"{url}?token={TOKEN}", "http://127.0.0.1:1"),  # 同じパソコンの別のポートのページ
     ):
         with pytest.raises(InvalidStatus) as info:
             async with connect(bad, origin=origin):  # type: ignore[arg-type]

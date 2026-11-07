@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import enum
 import logging
+import secrets
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 
 STALE_FEED_REASON = "時価配信が途絶えています"
 _SESSION_PHASES = frozenset({Phase.MORNING, Phase.LUNCH, Phase.AFTERNOON, Phase.PRE_CLOSE})
+_RECONCILE_PHASES = _SESSION_PHASES | {Phase.PRE_OPEN}
 
 
 class Command(enum.StrEnum):
@@ -226,7 +228,10 @@ class Engine:
         self.schedule = config.session.schedule()
         self.risk = RiskManager(config.risk, self.schedule)
         self.portfolio = Portfolio()
-        self.orders = OrderManager(broker, on_change=self._on_order_change, id_prefix=mode[:2])
+        # 注文IDは実行ごとに変える(同じ日に再起動しても、前の実行の記録を上書きしない)
+        self.orders = OrderManager(
+            broker, on_change=self._on_order_change, id_prefix=f"{mode[:2]}{secrets.token_hex(2)}"
+        )
         self.builders = {s: BarBuilder(s, config.strategy.bar_minutes) for s in config.symbols}
         self.bars_history: dict[str, deque[Bar]] = {s: deque(maxlen=600) for s in config.symbols}
         self.ctx = _Context(self)
@@ -235,6 +240,7 @@ class Engine:
         self.equity_curve: list[tuple[datetime, Decimal]] = []
         self.events_log: deque[_LogEntry] = deque(maxlen=300)
         self.fills_today: list[Fill] = []
+        self.old_ticks = 0
         self.started_at: datetime | None = None
 
         self._queue = _EventQueue()
@@ -311,10 +317,10 @@ class Engine:
 
     async def run(self) -> None:
         """実時間のモードでイベントを処理し続ける(STOP の操作か ``stop()`` で終わる)。"""
-        await self.start()
-        self._timer_task = asyncio.create_task(self._timer_loop(), name="engine-timer")
-        self._running = True
         try:
+            await self.start()
+            self._timer_task = asyncio.create_task(self._timer_loop(), name="engine-timer")
+            self._running = True
             while not self._stopping:
                 event = await self._queue.get()
                 await self._dispatch(event)
@@ -390,10 +396,17 @@ class Engine:
 
     # ---- 取引日の切り替え ---------------------------------------------------------------------
 
-    def _ensure_day(self, now: datetime) -> None:
+    def _ensure_day(self, now: datetime) -> bool:
+        """日付が進んでいたら取引日を切り替える。
+
+        日付は前にしか進めない。``now`` が今の取引日より前なら何もせず偽を返す
+        (前日の時刻が付いた配信で、緊急停止や当日の損益が消えてしまわないように)。
+        """
         today = now.astimezone(JST).date()
         if self.day == today:
-            return
+            return True
+        if self.day is not None and today < self.day:
+            return False
         if self.day is not None:
             self.close_day()
         self.day = today
@@ -412,6 +425,7 @@ class Engine:
         self.strategy.on_session_start(today, self.ctx)
         if self.schedule.calendar.is_trading_day(today):
             self.log("info", "system", f"{today:%Y-%m-%d} の取引を開始します")
+        return True
 
     def close_day(self) -> DaySummary | None:
         """当日の損益を確定して記録する(日付が変わったときとバックテストの終わりに呼ぶ)。"""
@@ -441,7 +455,10 @@ class Engine:
     # ---- ハンドラ ---------------------------------------------------------------------------
 
     async def _on_tick(self, tick: Tick) -> None:
-        self._ensure_day(tick.time)
+        if not self._ensure_day(tick.time):
+            # 取引日より前の時刻のティック(前日の終値の再送など)は使わない
+            self.old_ticks += 1
+            return
         if self.repo is not None and self.config.storage.record_ticks and self.mode != "backtest":
             self.repo.buffer_tick(tick)
         await self.broker.on_tick(tick)
@@ -499,7 +516,8 @@ class Engine:
             self._check_stale_feed(now, phase)
             await self._expire_limit_orders(now)
             interval = timedelta(seconds=self.config.risk.reconcile_interval_sec)
-            if self._last_reconcile is None or now - self._last_reconcile >= interval:
+            due = self._last_reconcile is None or now - self._last_reconcile >= interval
+            if due and (phase in _RECONCILE_PHASES or self._has_exposure()):
                 self._last_reconcile = now
                 await self.reconcile(now)
         self._sample_equity(now)
@@ -515,20 +533,22 @@ class Engine:
         cmd = event.command
         result: str
         if cmd is Command.PAUSE:
+            # 利用者が止めたら、時価の復旧で自動的に再開しない
+            self._stale_paused = False
             result = (
                 "新規エントリーを停止しました"
                 if self.risk.pause(event.reason)
                 else f"現在の状態({self.risk.state.label})では一時停止できません"
             )
         elif cmd is Command.RESUME:
-            self._stale_paused = False
-            self._flatten_requested = False
-            result = (
-                "新規エントリーを再開しました"
-                if self.risk.resume()
-                else f"現在の状態({self.risk.state.label})では再開できません"
-            )
+            if self.risk.resume():
+                self._stale_paused = False
+                self._flatten_requested = False
+                result = "新規エントリーを再開しました"
+            else:
+                result = f"現在の状態({self.risk.state.label})では再開できません"
         elif cmd is Command.FLATTEN:
+            self._stale_paused = False
             self.risk.pause("全決済の操作")
             self._request_flatten(event.reason)
             await self._flatten(now)
@@ -629,7 +649,9 @@ class Engine:
 
     async def _submit(self, req: OrderRequest, price: Decimal, reason: str) -> Order | None:
         now = self.clock.now()
-        pending_open = self.orders.pending_qty(req.symbol, PositionEffect.OPEN)
+        pending_open = {
+            s: self.orders.pending_qty(s, PositionEffect.OPEN) for s in self.config.symbols
+        }
         decision = self.risk.check(req, price, self.portfolio, now, pending_open)
         if not decision.approved:
             self._deny_once(req.symbol, f"発注を見送りました({req.symbol}): {decision.reason}")
@@ -681,10 +703,12 @@ class Engine:
             return
         self._last_flatten_attempt = now
         for order in self.orders.active_orders():
-            if order.request.effect is PositionEffect.OPEN and order.status in (
-                OrderStatus.SUBMITTED,
-                OrderStatus.PARTIALLY_FILLED,
-            ):
+            # 新規の注文と指値の返済注文を取り消す(指値の返済は約定しない恐れがあるので、
+            # 成行に置き換える)
+            replace = order.request.effect is PositionEffect.OPEN or (
+                order.request.order_type is OrderType.LIMIT
+            )
+            if replace and order.status in (OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED):
                 try:
                     await self.orders.cancel(order.client_order_id, now)
                 except BrokerError as exc:
@@ -764,7 +788,11 @@ class Engine:
             )
         elif not stale and self._stale_paused:
             self._stale_paused = False
-            if self.risk.state is RiskState.PAUSED and self.risk.reason == STALE_FEED_REASON:
+            if (
+                self.risk.state is RiskState.PAUSED
+                and self.risk.reason == STALE_FEED_REASON
+                and not self._flatten_requested
+            ):
                 self.risk.resume()
                 self.log("info", "feed", "時価配信が復旧したため、新規エントリーを再開しました")
 
@@ -775,9 +803,14 @@ class Engine:
             positions = await self.broker.fetch_positions()
         except BrokerError as exc:
             self.log("warning", "reconcile", f"照合のための取得に失敗しました: {exc}")
-            if self.risk.record_error(now):
+            # ザラ場の外で建玉も注文も無いなら、売買に影響しないので緊急停止の数には入れない
+            # (早朝の強制ログアウトや、寄り付き前のログイン待ちで止まらないように)
+            if (
+                self.schedule.is_continuous(now) or self._has_exposure()
+            ) and self.risk.record_error(now):
                 await self._on_halt(now)
             return
+        self.risk.record_success()
         for order, message in self.orders.resolve_unknown(snapshots, now):
             self.log("warning", "reconcile", f"{order.symbol}: {message}")
         for fill in self.orders.take_replayed_fills():
@@ -803,6 +836,9 @@ class Engine:
             self.log("error", "reconcile", message)
             self.risk.halt(message, now)
             await self._on_halt(now)
+
+    def _has_exposure(self) -> bool:
+        return bool(self.portfolio.open_symbols()) or bool(self.orders.active_orders())
 
     async def _restore_live_state(self, now: datetime) -> None:
         """本番の再起動時に、当日の約定と証券会社の建玉から状態を復元する。"""

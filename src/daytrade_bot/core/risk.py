@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -60,11 +61,12 @@ class RiskManager:
     # ---- 状態の操作 -------------------------------------------------------------------------
 
     def pause(self, reason: str = "利用者の操作") -> bool:
-        if self.state is RiskState.ACTIVE:
-            self.state = RiskState.PAUSED
-            self.reason = reason
-            return True
-        return False
+        """新規エントリーを止める。すでに止まっていれば理由だけを新しくする(緊急停止中は何もしない)。"""
+        if self.state is RiskState.HALTED:
+            return False
+        self.state = RiskState.PAUSED
+        self.reason = reason
+        return True
 
     def resume(self) -> bool:
         if self.state is RiskState.PAUSED:
@@ -108,12 +110,14 @@ class RiskManager:
         price: Decimal,
         portfolio: Portfolio,
         now: datetime,
-        pending_open_qty: int = 0,
+        pending_open: Mapping[str, int] | None = None,
     ) -> RiskDecision:
         """``req`` を送ってよいか。
 
-        ``pending_open_qty`` は同じ銘柄の未約定の新規注文の数量(符号付き)。
+        ``pending_open`` は銘柄ごとの未約定の新規注文の数量(符号付き)。建玉の上限と銘柄数の上限は、
+        約定済みの建玉に未約定の新規注文を足した数で判定する(約定の通知が遅れても上限を超えないように)。
         """
+        pending = dict(pending_open or {})
         if req.qty > self.config.max_order_qty:
             return RiskDecision.deny(f"1注文の数量上限({self.config.max_order_qty})を超えています")
         if not self.schedule.is_continuous(now):
@@ -143,15 +147,21 @@ class RiskManager:
         current_qty = portfolio.qty(req.symbol)
         if current_qty != 0 and (current_qty > 0) != (req.signed_qty > 0):
             return RiskDecision.deny("反対方向の建玉があります。先に返済してください")
-        new_symbol_qty = abs(current_qty + pending_open_qty + req.signed_qty)
+        new_symbol_qty = abs(current_qty + pending.get(req.symbol, 0) + req.signed_qty)
         symbol_value = new_symbol_qty * price
         if symbol_value > self.config.max_position_value_per_symbol:
             return RiskDecision.deny(
                 f"銘柄ごとの建玉上限({self.config.max_position_value_per_symbol:,}円)を超えます"
                 f"(発注後 {symbol_value:,.0f}円)"
             )
+        others = (set(portfolio.positions) | set(pending)) - {req.symbol}
         other_value = sum(
-            (portfolio.exposure(s) for s in portfolio.positions if s != req.symbol), Decimal(0)
+            (
+                abs(portfolio.qty(s) + pending.get(s, 0))
+                * portfolio.last_prices.get(s, portfolio.position(s).avg_price or price)
+                for s in others
+            ),
+            Decimal(0),
         )
         total_value = other_value + symbol_value
         if total_value > self.config.max_total_position_value:
@@ -159,7 +169,7 @@ class RiskManager:
                 f"建玉合計の上限({self.config.max_total_position_value:,}円)を超えます"
                 f"(発注後 {total_value:,.0f}円)"
             )
-        open_symbols = set(portfolio.open_symbols())
+        open_symbols = set(portfolio.open_symbols()) | {s for s, q in pending.items() if q != 0}
         if req.symbol not in open_symbols and len(open_symbols) >= self.config.max_open_positions:
             return RiskDecision.deny(
                 f"同時に持てる銘柄数の上限({self.config.max_open_positions})に達しています"

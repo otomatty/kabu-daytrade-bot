@@ -118,27 +118,50 @@ class KabuRestClient:
 
     async def authenticate(self) -> str:
         async with self._token_lock:
-            try:
-                resp = await self._client.post("/token", json={"APIPassword": self._password})
-            except httpx.HTTPError as exc:
-                raise KabuAuthError(
-                    f"kabuステーションに接続できません({self.config.base_url})。"
-                    "kabuステーションが起動しているか確認してください"
-                ) from exc
-            body = _loads(resp.content) or {}
-            if resp.status_code != 200 or not body.get("Token"):
-                code = body.get("Code")
-                if code == codes.BAD_PASSWORD_CODE:
-                    raise KabuAuthError("APIパスワードが違います")
-                if code in codes.NOT_LOGGED_IN_CODES:
-                    raise KabuAuthError("kabuステーションにログインしていません")
-                raise KabuAuthError(
-                    f"トークンを発行できませんでした(HTTP {resp.status_code} / {code}: "
-                    f"{body.get('Message', '')})"
-                )
-            self._token = str(body["Token"])
-            log.info("kabuステーションAPIのトークンを発行しました")
+            return await self._issue_token()
+
+    async def _ensure_token(self) -> str:
+        """トークンが無ければ発行する(同時に呼ばれても発行は1回だけ)。"""
+        async with self._token_lock:
+            if self._token is None:
+                return await self._issue_token()
             return self._token
+
+    async def _reauthenticate(self, failed: str | None) -> None:
+        """``failed`` のトークンが拒否されたので発行し直す。
+
+        別のリクエストがすでに発行し直していれば、そのトークンを使う。発行のたびに前のトークンが
+        無効になるので、同時に401を受けた複数のリクエストがそれぞれ発行すると、互いに無効にしてしまう。
+        """
+        async with self._token_lock:
+            if self._token is not None and self._token != failed:
+                return
+            self._token = None
+            await self._issue_token()
+
+    async def _issue_token(self) -> str:
+        """トークンを発行する(呼び出し側で _token_lock を取っていること)。"""
+        try:
+            resp = await self._client.post("/token", json={"APIPassword": self._password})
+        except httpx.HTTPError as exc:
+            raise KabuAuthError(
+                f"kabuステーションに接続できません({self.config.base_url})。"
+                "kabuステーションが起動しているか確認してください"
+            ) from exc
+        body = _loads(resp.content) or {}
+        if resp.status_code != 200 or not body.get("Token"):
+            code = body.get("Code")
+            if code == codes.BAD_PASSWORD_CODE:
+                raise KabuAuthError("APIパスワードが違います")
+            if code in codes.NOT_LOGGED_IN_CODES:
+                raise KabuAuthError("kabuステーションにログインしていません")
+            raise KabuAuthError(
+                f"トークンを発行できませんでした(HTTP {resp.status_code} / {code}: "
+                f"{body.get('Message', '')})"
+            )
+        self._token = str(body["Token"])
+        log.info("kabuステーションAPIのトークンを発行しました")
+        return self._token
 
     # ---- 送信 -------------------------------------------------------------------------------
 
@@ -156,14 +179,14 @@ class KabuRestClient:
 
         ``idempotent`` が偽(発注)の場合、応答が途切れたら ``OrderStateUnknown`` を送出する。
         """
-        if self._token is None:
-            await self.authenticate()
+        await self._ensure_token()
         reauthed = False
         attempt = 0
         while True:
             attempt += 1
             await self._limiters[category].acquire()
-            headers = {"X-API-KEY": self._token or ""}
+            used_token = self._token
+            headers = {"X-API-KEY": used_token or ""}
             self.requests += 1
             try:
                 resp = await self._client.request(
@@ -189,7 +212,7 @@ class KabuRestClient:
             if status == 401 and not reauthed:
                 # トークンが無効になった(早朝のログアウト、別のトークンの発行など)
                 reauthed = True
-                await self._reauthenticate()
+                await self._reauthenticate(used_token)
                 continue
             if status == 429 and attempt <= self._max_retries:
                 # 同じ種類のリクエスト全体を少し止めてから再送する(揺らぎを入れて重ならないように)
@@ -206,10 +229,6 @@ class KabuRestClient:
                         f"{message})。照合で確認します"
                     )
             raise KabuApiError(status, int(code) if code is not None else None, message)
-
-    async def _reauthenticate(self) -> None:
-        self._token = None
-        await self.authenticate()
 
     # ---- API --------------------------------------------------------------------------------
 

@@ -78,8 +78,17 @@ def test_denies(rm: RiskManager, kwargs: dict[str, int], price: int, when, reaso
 
 
 def test_pending_orders_count_toward_symbol_limit(rm: RiskManager) -> None:
-    d = rm.check(req(qty=300), D(1000), Portfolio(), at(10), pending_open_qty=300)
+    d = rm.check(req(qty=300), D(1000), Portfolio(), at(10), pending_open={"7203": 300})
     assert not d.approved and "銘柄ごと" in d.reason
+
+
+def test_pending_orders_in_other_symbols_count_toward_totals(rm: RiskManager) -> None:
+    p = Portfolio()
+    p.mark("6758", D(1000))
+    d = rm.check(req(qty=400), D(1000), p, at(10), pending_open={"6758": 450})
+    assert not d.approved and "建玉合計" in d.reason
+    d = rm.check(req(qty=100), D(1000), p, at(10), pending_open={"6758": 100, "9984": -100})
+    assert not d.approved and "銘柄数の上限" in d.reason
 
 
 def test_total_limit_and_open_positions(rm: RiskManager) -> None:
@@ -158,9 +167,10 @@ def test_loss_usage_zero_when_profitable(rm: RiskManager) -> None:
 
 def test_state_transitions(rm: RiskManager) -> None:
     assert rm.pause() and rm.state is RiskState.PAUSED
-    assert not rm.pause()
+    assert rm.pause("別の理由") and rm.reason == "別の理由"  # 止まっていれば理由を更新する
     assert rm.resume() and rm.state is RiskState.ACTIVE
     assert not rm.resume()
+    rm.resume()
     assert rm.halt("a", at(10)) and not rm.halt("b", at(10))
     assert rm.reason == "a" and rm.halted_at == at(10)
     assert not rm.pause() and not rm.resume()

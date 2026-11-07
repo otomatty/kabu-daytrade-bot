@@ -3,10 +3,13 @@
 kabuステーションAPI には注文状態の PUSH 配信がないので、注文照会を定期的に呼んで
 状態の変化と約定を検出する。約定は約定番号で重複を除く。
 
-建玉の扱い:
-- 信用取引: 建玉日が当日の建玉だけをボットの建玉とみなす(前日以前からのスイングの建玉は触らない)
-- 現物取引: 起動時点の保有株から、当日ボットが売買した分を差し引いた数を「元から持っていた株」として
-  除外する(長期保有の株をボットが売ってしまわないように)
+建玉の扱い(利用者が別に持っている建玉・株をボットが決済してしまわないように):
+- 信用取引: 起動した時点で建玉日が前日以前の建玉は「元から持っていた建玉」として建玉IDで除外する。
+  それ以外(当日の建玉と、起動後にできた建玉)をボットの建玉とみなす。
+  日付が変わっても除外の対象は変わらない
+- 現物取引: 起動した時点の保有株から、当日の現物の約定(証券会社の注文照会による。
+  ボットが止まっている間の約定も含む)を差し引いた数を「元から持っていた株」として除外する。
+  そのため、現物では対象の銘柄を同じ日に手動で売買しないこと
 """
 
 from __future__ import annotations
@@ -83,6 +86,7 @@ class KabuBroker:
         self._tracked: dict[str, _Tracked] = {}
         self._seen_exec: set[str] = set()
         self._cash_baseline: dict[str, int] = {}
+        self._ignored_holds: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._last_poll: datetime | None = None
         self._polls = 0
@@ -111,14 +115,49 @@ class KabuBroker:
                 "起動前からの未約定の注文があります(ボットは管理しません): %s",
                 ", ".join(self.preexisting_active_orders),
             )
-        if self._trading.account_mode is AccountMode.CASH:
+        today = self._clock.now().astimezone(JST).strftime("%Y%m%d")
+        if self._trading.account_mode is AccountMode.MARGIN:
+            for row in await self._client.positions(product=codes.PRODUCT_MARGIN):
+                if str(row.get("ExecutionDay") or "") != today and row.get("ExecutionID"):
+                    self._ignored_holds.add(str(row["ExecutionID"]))
+            if self._ignored_holds:
+                log.warning(
+                    "前日以前からの信用建玉が %d 件あります。ボットはこれらを扱いません",
+                    len(self._ignored_holds),
+                )
+        else:
             holdings = await self._raw_positions()
-            bot_today = self._today_net_qty()
+            today_net = await self._today_cash_executions(today)
+            recorded = self._today_net_qty()
+            for symbol in set(today_net) | set(recorded):
+                if today_net.get(symbol, 0) != recorded.get(symbol, 0):
+                    log.warning(
+                        "%s: 当日の現物の約定(%d株)がボットの記録(%d株)と違います。"
+                        "証券会社の約定をボットの売買として扱います",
+                        symbol,
+                        today_net.get(symbol, 0),
+                        recorded.get(symbol, 0),
+                    )
             self._cash_baseline = {
-                symbol: qty - bot_today.get(symbol, 0) for symbol, (qty, _) in holdings.items()
+                symbol: qty - today_net.get(symbol, 0) for symbol, (qty, _) in holdings.items()
             }
         self._last_poll = self._clock.now()
         self._task = asyncio.create_task(self._poll_loop(), name="kabu-order-poll")
+
+    async def _today_cash_executions(self, today: str) -> dict[str, int]:
+        """当日の現物の約定数量(買いが正)を、証券会社の注文照会から求める。"""
+        net: dict[str, int] = {}
+        for order in await self._client.orders(product=codes.PRODUCT_CASH):
+            received = parse_time(order.get("RecvTime"))
+            if received is None or received.strftime("%Y%m%d") != today:
+                continue
+            side = codes.SIDE_FROM_CODE.get(str(order.get("Side")))
+            if side is None:
+                continue
+            symbol = str(order.get("Symbol"))
+            cum = int(Decimal(str(order.get("CumQty") or 0)))
+            net[symbol] = net.get(symbol, 0) + cum * side.sign
+        return net
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -180,14 +219,13 @@ class KabuBroker:
         """返済する建玉(建玉IDと数量)を、古い建玉から順に選ぶ。"""
         rows = await self._client.positions(product=codes.PRODUCT_MARGIN, symbol=req.symbol)
         want_side = codes.SIDE[req.side.opposite]  # 買いの返済は売り建玉、売りの返済は買い建玉
-        today = self._clock.now().astimezone(JST).strftime("%Y%m%d")
         candidates = [
             r
             for r in rows
             if str(r.get("Symbol")) == req.symbol
             and str(r.get("Side")) == want_side
-            and str(r.get("ExecutionDay") or "") == today
             and r.get("ExecutionID")
+            and str(r.get("ExecutionID")) not in self._ignored_holds
         ]
         candidates.sort(key=lambda r: str(r.get("ExecutionID")))
         remaining = req.qty
@@ -209,7 +247,7 @@ class KabuBroker:
                 break
         if remaining > 0:
             raise OrderRejected(
-                f"返済できる当日の建玉が足りません({req.symbol}: 必要 {req.qty}株 / "
+                f"返済できるボットの建玉が足りません({req.symbol}: 必要 {req.qty}株 / "
                 f"返済可能 {req.qty - remaining}株)"
             )
         if len(exchanges) > 1:
@@ -245,13 +283,12 @@ class KabuBroker:
         return result
 
     async def _raw_positions(self) -> dict[str, tuple[int, Decimal]]:
-        """銘柄ごとの (符号付き数量, 平均単価)。信用は当日の建玉だけ。"""
+        """銘柄ごとの (符号付き数量, 取得金額の合計)。信用は除外した建玉を除く。"""
         margin = self._trading.account_mode is AccountMode.MARGIN
         product = codes.PRODUCT_MARGIN if margin else codes.PRODUCT_CASH
-        today = self._clock.now().astimezone(JST).strftime("%Y%m%d")
         sums: dict[str, tuple[int, Decimal]] = {}
         for row in await self._client.positions(product=product):
-            if margin and str(row.get("ExecutionDay") or "") != today:
+            if margin and str(row.get("ExecutionID") or "") in self._ignored_holds:
                 continue
             side = codes.SIDE_FROM_CODE.get(str(row.get("Side")))
             if side is None:
@@ -285,6 +322,10 @@ class KabuBroker:
                 self.poll_errors += 1
                 if self.poll_errors in (1, 10) or self.poll_errors % 60 == 0:
                     log.warning("注文照会に失敗しました(%d回目): %s", self.poll_errors, exc)
+            except Exception:
+                # 想定外のデータなどで監視が止まると約定を取りこぼすので、記録して続ける
+                self.poll_errors += 1
+                log.exception("注文照会の処理中に想定外のエラー")
 
     async def poll_once(self) -> int:
         """注文照会を1回行い、変化があった注文の更新を通知する。通知した件数を返す。"""

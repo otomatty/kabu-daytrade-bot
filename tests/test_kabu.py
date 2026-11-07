@@ -304,7 +304,7 @@ class TestBroker:
 
     async def test_close_without_position_is_rejected_locally(self, server: Server) -> None:
         broker, c, _ = await start_broker(server)
-        with pytest.raises(OrderRejected, match="返済できる当日の建玉が足りません"):
+        with pytest.raises(OrderRejected, match="返済できるボットの建玉が足りません"):
             await broker.place_order(req(Side.SELL, effect=PositionEffect.CLOSE))
         await broker.stop()
         await c.aclose()
@@ -335,7 +335,7 @@ class TestBroker:
         )
         broker, c, _ = await start_broker(server)
         assert await broker.fetch_positions() == []
-        with pytest.raises(OrderRejected, match="当日の建玉"):
+        with pytest.raises(OrderRejected, match="ボットの建玉が足りません"):
             await broker.place_order(req(Side.SELL, effect=PositionEffect.CLOSE))
         await broker.stop()
         await c.aclose()
@@ -548,4 +548,75 @@ async def test_mock_responses_match_official_schema(server: Server) -> None:
             r = await h.request(method, path, params=params)
             assert r.status_code == 200
             assert validate_response(method, "/kabusapi" + path, r.json()) == []
+    await c.aclose()
+
+
+# ---- 独立したレビューで見つかった不具合の回帰テスト -------------------------------------------
+
+
+async def test_concurrent_401_issue_only_one_new_token(server: Server) -> None:
+    c = server.client()
+    await c.authenticate()
+    await server.control("expire_token")
+    before = [r["path"] for r in server.mock.requests].count("/kabusapi/token")
+    results = await asyncio.gather(c.wallet_cash(), c.wallet_margin(), c.orders(), c.soft_limit())
+    assert all(r is not None for r in results)
+    after = [r["path"] for r in server.mock.requests].count("/kabusapi/token")
+    assert after - before == 1  # 互いのトークンを無効にし合わない
+    await c.aclose()
+
+
+async def test_concurrent_first_requests_issue_one_token(server: Server) -> None:
+    c = server.client()
+    await asyncio.gather(*(c.wallet_cash() for _ in range(4)))
+    assert [r["path"] for r in server.mock.requests].count("/kabusapi/token") == 1
+    await c.aclose()
+
+
+async def test_margin_positions_stay_visible_after_midnight(server: Server) -> None:
+    broker, c, updates = await start_broker(server)
+    await broker.place_order(req())
+    await wait_for(lambda: any(u.fills for u in updates))
+    # 日付が変わって建玉日が「前日」になっても、起動後にできたボットの建玉として扱い続ける
+    for p in server.mock.positions:
+        p.day = "20261108"
+    (pos,) = await broker.fetch_positions()
+    assert pos.qty == 100
+    payload = await broker.build_payload(req(Side.SELL, effect=PositionEffect.CLOSE))
+    assert payload["ClosePositions"][0]["Qty"] == 100
+    await broker.stop()
+    await c.aclose()
+
+
+async def test_cash_fills_during_downtime_are_the_bots(server: Server) -> None:
+    """ボットが止まっている間に約定した現物の買いは、ボットの建玉として扱う(売り忘れない)。"""
+    server.mock.add_cash_holding("7203", 500, D(1800))  # 長期保有の株
+    trading = TradingConfig(account_mode="cash", cash_fund_type="02")
+    first, c1, updates = await start_broker(server, trading)
+    await first.place_order(req())
+    await wait_for(lambda: any(u.fills for u in updates))
+    await first.stop()  # ここでボットが落ち、約定は記録されなかった
+    second, c2, _ = await start_broker(server, trading, today_net_qty=dict)
+    (pos,) = await second.fetch_positions()
+    assert pos.qty == 100
+    await second.stop()
+    await c1.aclose()
+    await c2.aclose()
+
+
+async def test_poll_loop_survives_unexpected_errors(server: Server) -> None:
+    broker, c, _ = await start_broker(server)
+    calls = {"n": 0}
+    original = broker.poll_once
+
+    async def boom() -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("想定外のデータ")
+        return await original()
+
+    broker.poll_once = boom  # type: ignore[method-assign]
+    await wait_for(lambda: calls["n"] >= 3)
+    assert broker._task is not None and not broker._task.done()
+    await broker.stop()
     await c.aclose()

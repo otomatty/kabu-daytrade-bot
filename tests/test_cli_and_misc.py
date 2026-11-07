@@ -380,3 +380,19 @@ async def test_paper_mode_end_to_end(workdir: Path, capsys: pytest.CaptureFixtur
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, 5)
+
+
+def test_live_startup_failure_is_reported(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """kabuステーションに接続できないときは、黙って終わらずに理由を表示する。"""
+    from tests.test_kabu import free_port
+
+    cli.main(["init"])
+    cfg = workdir / "config" / "settings.yaml"
+    text = cfg.read_text(encoding="utf-8").replace("live_enabled: false", "live_enabled: true")
+    text = text.replace("  host: localhost\n", f"  host: 127.0.0.1\n  port: {free_port()}\n")
+    cfg.write_text(text.replace("port: 8765", f"port: {free_port()}"), encoding="utf-8")
+    (workdir / ".env").write_text("KABU_API_PASSWORD=x\n", encoding="utf-8")
+    assert cli.main(["live", "--confirm-live", "--no-browser"]) == 2
+    assert "kabuステーションに接続できません" in capsys.readouterr().err

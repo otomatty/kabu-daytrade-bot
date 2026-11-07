@@ -190,10 +190,14 @@ async def _serve(
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.add_signal_handler(sig, request_stop)
-    _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     request_stop()
     for task in pending:
         await task
+    # 起動に失敗したときなどは、例外をそのまま伝えて利用者に知らせる
+    for task in done:
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            raise exc
 
 
 def _demo_start(config: AppConfig) -> datetime:
