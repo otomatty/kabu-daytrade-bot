@@ -1,0 +1,98 @@
+# dtbot の設定ファイルの例。コピーして config/settings.yaml として使う。
+# APIパスワードなどの秘密情報はここに書かず、.env に書く(.env.example を参照)。
+
+# 取引する銘柄(最大50。PUSH配信の登録上限)
+universe:
+  - symbol: "7203"
+    name: トヨタ自動車
+    tick_table: topix500 # TOPIX500構成銘柄は topix500、それ以外は standard
+  - symbol: "6758"
+    name: ソニーグループ
+    tick_table: topix500
+  - symbol: "9984"
+    name: ソフトバンクグループ
+    tick_table: topix500
+
+strategy:
+  name: orb # 同梱の戦略名、または "パッケージ.モジュール:クラス名"
+  bar_minutes: 1
+  params:
+    range_minutes: 15 # 寄付きから何分間の高値・安値をレンジとするか
+    breakout_buffer_pct: 0.0
+    stop_fraction: 1.0 # 1.0=レンジの反対側で損切り、0.5=レンジの中央
+    take_profit_r: 2.0 # 利食い=損切り幅の何倍か
+    max_trades_per_day: 1
+    allow_short: true # 現物取引(cash)では false にする
+    entry_deadline: "11:00"
+    min_range_pct: 0.2
+    max_range_pct: 3.0
+
+sizing:
+  method: fixed_notional # fixed_notional=金額で配分 / fixed_qty=株数で固定
+  notional: 300000 # 1回の売買に使う金額の目安(円)
+  qty: 100 # fixed_qty のときの株数
+  lot_size: 100 # 売買単位
+
+trading:
+  account_mode: margin # margin=信用取引 / cash=現物取引
+  margin_trade_type: system # system=制度信用 / day_trade=一般信用(デイトレ) / long_term=一般信用(長期)
+  account_type: specific # specific=特定口座 / general=一般口座 / corporate=法人
+  order_exchange: tse_plus # 新規注文の市場。tse_plus=東証+ / sor=SOR
+  cash_fund_type: AA # 現物買いの資産区分。AA=信用代用 / 02=保護
+  limit_order_timeout_sec: 30 # 指値がこの秒数約定しなければ取り消す
+  live_enabled: false # true にしない限り、本番(live)は起動しない
+
+risk:
+  max_daily_loss: 30000 # 1日の損失がこの金額に達したら緊急停止して全決済(円)
+  max_position_value_per_symbol: 1000000 # 銘柄ごとの建玉の上限(円)
+  max_total_position_value: 2000000 # 建玉の合計の上限(円)
+  max_open_positions: 3 # 同時に持つ銘柄数の上限
+  max_order_qty: 10000 # 1注文の株数の上限
+  max_orders_per_minute: 10 # 1分あたりの新規注文の上限(暴走防止)
+  max_consecutive_errors: 3 # 発注エラーがこの回数続いたら緊急停止
+  stale_data_sec: 30 # 場中に時価配信がこの秒数届かなければ新規を止める
+  reconcile_interval_sec: 30 # 証券会社の注文・建玉と照合する間隔
+
+session:
+  entry_start: "09:00"
+  entry_cutoff: "15:10" # これ以降は新規エントリーしない
+  flatten_at: "15:20" # この時刻に全建玉を成行で手仕舞い(15:25より前にする)
+  trade_morning: true
+  trade_afternoon: true
+  extra_holidays: [] # 臨時休場日 例: ["2026-12-01"]
+
+fees: # バックテストとペーパーの手数料。本番は約定明細の値を使う
+  kind: zero # zero / percent / fixed
+  rate: 0
+  minimum: 0
+  amount: 0
+
+simulation:
+  slippage_ticks: 1 # 成行の約定を何呼値不利にするか
+  limit_fill_on_touch: false # 指値と同値で約定とみなすか
+  initial_capital: 3000000 # バックテストの資金(ドローダウン率とシャープレシオの計算用)
+
+kabu:
+  environment: production # production=本番(18080) / verification=検証用(18081)
+  host: localhost
+  order_rate_per_sec: 5 # 発注系の上限は秒間10件。余裕を持たせる
+  info_rate_per_sec: 5
+  poll_interval_sec: 1.0 # 注文状態を確認する間隔
+  request_timeout_sec: 10
+
+dashboard:
+  enabled: true
+  host: 127.0.0.1 # 外部に公開しないこと
+  port: 8765
+
+notify:
+  kind: none # none / slack / discord(Webhook URL は .env の DTBOT_WEBHOOK_URL)
+  min_level: warning
+
+storage:
+  path: data/dtbot.sqlite3
+  record_ticks: true # 受信したティックを保存してバックテストに使う
+
+logging:
+  level: INFO
+  directory: logs
