@@ -17,6 +17,9 @@ dependencies = [
     "tzdata>=2024.1",
 ]
 
+[project.urls]
+Repository = "https://github.com/otomatty/kabu-daytrade-bot"
+
 [project.scripts]
 dtbot = "daytrade_bot.cli:main"
 

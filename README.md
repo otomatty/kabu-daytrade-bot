@@ -36,8 +36,9 @@
 # uv をまだ入れていない場合
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# 展開したフォルダに移動して、依存パッケージを入れる
-cd daytrade-bot
+# リポジトリを取得して、依存パッケージを入れる
+git clone https://github.com/otomatty/kabu-daytrade-bot.git
+cd kabu-daytrade-bot
 uv sync
 ```
 
