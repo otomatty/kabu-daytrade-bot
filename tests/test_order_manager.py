@@ -5,7 +5,12 @@ from datetime import timedelta
 
 import pytest
 
-from daytrade_bot.brokers.base import BrokerUnavailable, OrderRejected, OrderStateUnknown
+from daytrade_bot.brokers.base import (
+    BrokerError,
+    BrokerUnavailable,
+    OrderRejected,
+    OrderStateUnknown,
+)
 from daytrade_bot.core.models import (
     BrokerOrderSnapshot,
     BrokerOrderUpdate,
@@ -153,6 +158,9 @@ async def test_partial_update_with_full_qty_becomes_filled() -> None:
         (OrderRejected("余力不足", code=4002001), OrderStatus.REJECTED),
         (BrokerUnavailable("接続できません"), OrderStatus.REJECTED),
         (OrderStateUnknown("タイムアウト"), OrderStatus.UNKNOWN),
+        # 送信前の照会で失敗: 送られていないので、未約定の注文として残らない
+        (BrokerError("建玉の照会に失敗"), OrderStatus.REJECTED),
+        (RuntimeError("想定外"), OrderStatus.UNKNOWN),
     ],
 )
 async def test_submit_errors(error: Exception, status: OrderStatus) -> None:

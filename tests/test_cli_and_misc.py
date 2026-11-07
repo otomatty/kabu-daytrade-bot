@@ -90,6 +90,7 @@ class TestDemoFeed:
         feed, clock, _ = self.make(at(11, 45))
         assert feed.skip_closed_time(at(11, 45))
         assert at(12, 30) <= clock.now() < at(12, 31)
+        assert feed.last_message_at == at(12, 30)
         assert feed.skip_closed_time(at(15, 31))
         assert clock.now().date() == date(2026, 11, 10)
         assert feed.skip_closed_time(at(10, day=date(2026, 11, 7)))  # 土曜
@@ -329,7 +330,6 @@ async def test_paper_mode_end_to_end(workdir: Path, capsys: pytest.CaptureFixtur
     import httpx
     import uvicorn
 
-    from daytrade_bot.core.clock import OffsetClock
     from daytrade_bot.devtools.mock_kabu import MockKabuStation
     from tests.test_kabu import free_port
 

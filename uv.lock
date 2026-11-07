@@ -301,8 +301,8 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tzdata", specifier = ">=2024.1" },
-    { name = "uvicorn", specifier = ">=0.30" },
-    { name = "websockets", specifier = ">=13" },
+    { name = "uvicorn", specifier = ">=0.35" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [package.metadata.requires-dev]

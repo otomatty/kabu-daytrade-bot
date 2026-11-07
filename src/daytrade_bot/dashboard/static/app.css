@@ -268,7 +268,7 @@ main { padding: 20px 24px 8px; display: grid; gap: var(--space); max-width: 1480
 .table th {
   position: sticky; top: 0; background: var(--panel);
   text-align: left; font-weight: 700; color: var(--muted); font-size: .8rem;
-  border-bottom: 1px solid var(--line-strong); padding: 4px 8px;
+  border-bottom: 1px solid var(--line-strong); padding: 4px 8px; white-space: nowrap;
 }
 .table td { padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 .table td.num, .table td.r, .table th.r { text-align: right; }

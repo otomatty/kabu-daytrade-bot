@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import time
 from decimal import Decimal
 
-from daytrade_bot.core.models import Bar, Fill, PositionEffect, Side, SignalAction
+from daytrade_bot.core.models import Bar, Fill, PositionEffect, Side, Signal, SignalAction
 from daytrade_bot.strategies.orb import OpeningRangeBreakout
 from tests.conftest import D, at, bar, tick
 
@@ -46,8 +46,8 @@ def range_bars(low: float = 1990, high: float = 2010) -> list[Bar]:
     ]
 
 
-def run(strategy: OpeningRangeBreakout, ctx: Ctx, bars: list[Bar]) -> list:
-    out = []
+def run(strategy: OpeningRangeBreakout, ctx: Ctx, bars: list[Bar]) -> list[Signal]:
+    out: list[Signal] = []
     for b in bars:
         out += list(strategy.on_bar(b, ctx))
     return out

@@ -19,6 +19,7 @@ from decimal import Decimal
 
 from daytrade_bot.brokers.base import (
     Broker,
+    BrokerError,
     BrokerUnavailable,
     OrderRejected,
     OrderStateUnknown,
@@ -179,6 +180,15 @@ class OrderManager:
             return SubmitResult(order, str(exc))
         except OrderStateUnknown as exc:
             self._set_status(order, OrderStatus.UNKNOWN, now, reason=str(exc))
+            return SubmitResult(order, str(exc))
+        except BrokerError as exc:
+            # 発注の前段(返済する建玉の照会など)で失敗した。注文は送られていない
+            self._set_status(order, OrderStatus.REJECTED, now, reason=f"送信前のエラー: {exc}")
+            return SubmitResult(order, str(exc))
+        except Exception as exc:
+            # 想定外の例外では送られたか分からないので、状態不明として照合に任せる
+            log.exception("発注中の想定外のエラー")
+            self._set_status(order, OrderStatus.UNKNOWN, now, reason=f"想定外のエラー: {exc}")
             return SubmitResult(order, str(exc))
         order.broker_order_id = broker_id
         self._by_broker_id[broker_id] = req.client_order_id

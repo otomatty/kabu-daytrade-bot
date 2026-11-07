@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, time, timedelta
 from decimal import Decimal
+from typing import Any
 
 from pydantic import Field, model_validator
 
@@ -67,7 +68,7 @@ class OpeningRangeBreakout(Strategy[ORBParams]):
     description = "寄付き後のレンジを抜けた方向に乗るブレイクアウト戦略"
     Params = ORBParams
 
-    def __init__(self, symbols: Sequence[str], params: dict[str, object] | None = None) -> None:
+    def __init__(self, symbols: Sequence[str], params: Mapping[str, Any] | None = None) -> None:
         super().__init__(symbols, params)
         self._state: dict[str, _DayState] = {s: _DayState() for s in self.symbols}
 

@@ -124,15 +124,18 @@ class DemoFeed:
         phase = self._schedule.phase(now)
         times = self._schedule.times
         if phase is Phase.LUNCH:
-            self._clock.jump_to(datetime.combine(now.date(), times.afternoon_open, tzinfo=JST))
-            return True
-        if phase in (Phase.CLOSED, Phase.HOLIDAY) and (
-            phase is Phase.HOLIDAY or now.time() >= times.closing_auction
+            target = datetime.combine(now.date(), times.afternoon_open, tzinfo=JST)
+        elif phase is Phase.HOLIDAY or (
+            phase is Phase.CLOSED and now.time() >= times.closing_auction
         ):
             day = self._schedule.calendar.next_trading_day(now.date())
-            self._clock.jump_to(datetime.combine(day, time(8, 59, 30), tzinfo=JST))
-            return True
-        return False
+            target = datetime.combine(day, time(8, 59, 30), tzinfo=JST)
+        else:
+            return False
+        self._clock.jump_to(target)
+        # 時計を進めたことで「配信が途絶えた」と誤って判定されないようにする
+        self._last = target
+        return True
 
     async def _run(self) -> None:
         while True:
