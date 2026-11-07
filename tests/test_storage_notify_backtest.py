@@ -99,11 +99,15 @@ class TestRepository:
             Repository(path)
 
     def test_transaction_rollback(self, repo: Repository) -> None:
-        with pytest.raises(ValueError, match="boom"), repo._tx() as c:
-            c.execute(
-                "INSERT INTO runs(run_id, mode, strategy, started_at, config) VALUES ('x','m','s','t','{}')"
-            )
-            raise ValueError("boom")
+        def insert_then_fail() -> None:
+            with repo._tx() as c:
+                c.execute(
+                    "INSERT INTO runs(run_id, mode, strategy, started_at, config) VALUES ('x','m','s','t','{}')"
+                )
+                raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            insert_then_fail()
         assert repo._query("SELECT * FROM runs") == []
 
     def test_parse_dt_assumes_jst(self) -> None:
@@ -161,9 +165,9 @@ class TestNotify:
             client=client,
             min_interval_sec=0,
         )
-        assert n.payload(type("M", (), {"level": "info", "title": "t", "message": "m"})()) == {
-            "content": "ℹ️ [dtbot] t\nm"
-        }  # type: ignore[arg-type]
+        from daytrade_bot.notify import _Message
+
+        assert n.payload(_Message("info", "t", "m")) == {"content": "ℹ️ [dtbot] t\nm"}
         n.post("info", "t", "m")
         await asyncio.sleep(0.05)
         await n.aclose()
